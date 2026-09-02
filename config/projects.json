@@ -1,0 +1,15 @@
+[
+  {
+    "project_id": "mystic_recovery",
+    "display_name": "神秘复苏",
+    "source_dir": "神秘复苏原文",
+    "encoding": "utf-8",
+    "chapter_patterns": [
+      "^第([0-9一二三四五六七八九十百千万零]+)章\\s*(.*)$"
+    ],
+    "remove_duplicate_chapter_title": true,
+    "chunk_size": 1000,
+    "chunk_overlap": 200,
+    "language": "zh"
+  }
+]

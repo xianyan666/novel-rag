@@ -1,0 +1,54 @@
+[
+  {
+    "name": "杨间",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "周正",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "曹延华",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "林龙",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "高志强",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "李军",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "秦老",
+    "type": "character",
+    "aliases": []
+  },
+  {
+    "name": "鬼眼",
+    "type": "item",
+    "subtype": "ability",
+    "aliases": []
+  },
+  {
+    "name": "饿死鬼",
+    "type": "character",
+    "subtype": "ghost",
+    "aliases": []
+  },
+  {
+    "name": "鬼域",
+    "type": "concept",
+    "aliases": []
+  }
+]

@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+requests
+pydantic
+faiss-cpu
+numpy
+jieba

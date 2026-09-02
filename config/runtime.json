@@ -1,0 +1,10 @@
+{
+  "llm_provider": "ollama",
+  "llm_model": "qwen2.5:7b",
+  "embedding_provider": "ollama",
+  "embedding_model": "bge-m3",
+  "temperature": 0.2,
+  "top_k": 8,
+  "context_chunks": 5,
+  "index_base_dir": "C:/rag_index"
+}
