@@ -1,6 +1,6 @@
 """从 chunks.jsonl 规则抽取通用叙事事件，并生成 follows 边。
 
-v2.1：收紧规则，降低鬼眼/同章/论坛噪声。
+v2.2：在 v2.1 基础上，修正否定句/规则句误判为死亡。
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ EVENT_PATTERNS: dict[str, list[str]] = {
         "规则是", "鬼域规则", "存在一条规则", "这条规则",
         "一旦违反", "违反规则", "必须遵守", "不能做的事",
         "杀人规则", "鬼的规则",
+        "鬼无法被杀死", "鬼是杀不死", "杀不死的", "鬼杀不死",
+        "能对付鬼的只有鬼", "洞察鬼的规律",
     ],
     "ability_change": [
         # 不再用裸「鬼眼」——必须是变化/掌控类短语
@@ -116,9 +118,46 @@ def extract_evidence(text: str, keyword: str, max_len: int = 300) -> str:
     return evidence
 
 
+
 def _is_noisy_evidence(evidence: str) -> bool:
     return any(m in evidence for m in NOISE_EVIDENCE_MARKERS)
 
+
+# 死亡语境：否定句 / 规则陈述（如「鬼无法被杀死」）
+_DEATH_NEGATION_RE = re.compile(
+    r"(?:无法|不能|难以|不可|没能|不会|未曾).{0,8}(?:被杀死|杀死|死亡|死去|身亡)"
+    r"|(?:杀不死|死不了|杀不掉)"
+    r"|鬼无法被杀死|鬼是杀不死|鬼杀不死"
+)
+_DEATH_RULE_MARKERS = [
+    "记住这句话", "写在黑板", "黑板上", "三句话",
+    "规律", "规则", "请你们记住", "永远记住",
+    "对付鬼的只有鬼", "洞察鬼",
+]
+
+
+def _death_context_kind(evidence: str, pattern: str) -> str:
+    """返回 actual / rule / drop。
+
+    - actual: 可作为 death_or_seal
+    - rule: 应记为 rule_reveal（否定/规则陈述）
+    - drop: 丢弃
+    """
+    window = re.sub(r"\s+", "", evidence)
+    # 模式前后局部窗口，捕捉「无法被杀死」
+    idx = evidence.find(pattern)
+    local = evidence[max(0, idx - 12): idx + len(pattern) + 12] if idx >= 0 else evidence
+    local_compact = re.sub(r"\s+", "", local)
+
+    negated = bool(_DEATH_NEGATION_RE.search(local_compact) or _DEATH_NEGATION_RE.search(window))
+    ruleish = any(m in evidence for m in _DEATH_RULE_MARKERS)
+
+    if negated or ruleish:
+        # 教学/设定句：升级为规则揭示，而不是死亡事件
+        if negated or "鬼" in evidence or ruleish:
+            return "rule"
+        return "drop"
+    return "actual"
 
 def _summarize(event_type: str, keyword: str, evidence: str) -> str:
     label = EVENT_TYPE_LABELS.get(event_type, event_type)
@@ -221,12 +260,26 @@ def build_timeline(project_id: str) -> dict:
                         window = evidence
                         if not any(x in window for x in ("鬼", "厉", "老人", "人影", "尸体")):
                             continue
+
+                    final_type = event_type
+                    if event_type == "death_or_seal":
+                        kind = _death_context_kind(evidence, pat)
+                        if kind == "drop":
+                            continue
+                        if kind == "rule":
+                            # 否定/规则句：改记为规则揭示，避免误判死亡
+                            final_type = "rule_reveal"
+                            alt_key = (chunk_id, final_type)
+                            if alt_key in seen:
+                                continue
+                            dedup_key = alt_key
+
                     seen.add(dedup_key)
                     subjects = _extract_subjects(text, names)
                     events.append({
                         "event_id": f"{project_id}_evt_{len(events)+1:06d}",
                         "project_id": project_id,
-                        "event_type": event_type,
+                        "event_type": final_type,
                         "chapter_no": chapter_no,
                         "chapter_title": chapter_title,
                         "chunk_id": chunk_id,
@@ -234,10 +287,13 @@ def build_timeline(project_id: str) -> dict:
                         "objects": [],
                         "world_name": None,
                         "matched_pattern": pat,
-                        "event_summary": _summarize(event_type, pat, evidence),
+                        "event_summary": _summarize(final_type, pat, evidence),
                         "evidence": evidence,
-                        "confidence": 0.75,
-                        "extract_method": "rule_v2.1",
+                        "confidence": 0.78 if final_type == event_type else 0.7,
+                        "extract_method": "rule_v2.2",
+                        "reclassified_from": (
+                            "death_or_seal" if final_type != event_type else None
+                        ),
                     })
                     break
 
@@ -280,7 +336,7 @@ def build_timeline(project_id: str) -> dict:
     index = {
         "project_id": project_id,
         "schema_version": 2,
-        "extract_version": "rule_v2.1",
+        "extract_version": "rule_v2.2",
         "edge_relation_default": "follows",
         "event_types": sorted(EVENT_TYPE_LABELS.keys()),
         "by_event_type": by_event_type,
@@ -295,6 +351,7 @@ def build_timeline(project_id: str) -> dict:
             "subjects = character seeds only",
             "max 1 event per chapter+type",
             "drop forum/noise evidence markers",
+            "death negation/rule -> rule_reveal",
         ],
     }
     index_path = dd / "timeline_index.json"
