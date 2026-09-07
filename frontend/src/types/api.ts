@@ -54,6 +54,22 @@ export interface TimelineEventInfo {
   confidence?: number
 }
 
+export interface CausalEdgeInfo {
+  edge_id: string
+  relation: string
+  from_event_id: string
+  to_event_id: string
+  from_chapter_no?: number
+  to_chapter_no?: number
+  from_event_type?: string
+  to_event_type?: string
+  shared_subjects?: string[]
+  evidence?: string
+  from_summary?: string
+  to_summary?: string
+  confidence?: number
+}
+
 export interface TimelineEdgeInfo {
   edge_id: string
   from_event_id: string
@@ -171,6 +187,7 @@ export interface QueryResponse {
   retrieved_chunks: RetrievedChunk[]
   query_analysis?: QueryAnalysis
   timeline_events?: TimelineEventInfo[]
+  causal_edges?: CausalEdgeInfo[]
   entity_analysis?: EntityAnalysis
   entity_mentions?: EntityMention[]
   entity_timeline?: EntityTimelineEvent[]

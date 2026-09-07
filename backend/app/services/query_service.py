@@ -50,6 +50,7 @@ def generate_answer(
     entity_timeline: list[dict] | None = None,
     entity_relations: list[dict] | None = None,
     protected_answer: dict | None = None,
+    causal_edges: list[dict] | None = None,
 ) -> str:
     runtime = load_runtime()
     context_parts = []
@@ -93,6 +94,25 @@ def generate_answer(
         extra_instructions = "\n注意：" + "；".join(guard["warnings"])
 
     # Build structured conclusion block for protected answers
+    causal_block = ""
+    if causal_edges:
+        lines = []
+        for edge in causal_edges[:12]:
+            rel = edge.get("relation", "")
+            fc = edge.get("from_chapter_no", "?")
+            tc = edge.get("to_chapter_no", "?")
+            fs = (edge.get("from_summary") or "")[:60]
+            ts = (edge.get("to_summary") or "")[:60]
+            conf = edge.get("confidence", 0)
+            lines.append(
+                f"- [{rel} | conf={conf}] 第{fc}章「{fs}」 => 第{tc}章「{ts}」"
+            )
+        causal_block = "\n\n【因果候选边】\n" + "\n".join(lines)
+        causal_block += (
+            "\n回答「为什么」时优先依据这些边与原文；若边证据不足请明确说不确定，"
+            "不要编造未出现的因果。"
+        )
+
     protected_block = ""
     if protected_answer:
         pa_type = protected_answer.get("type", "")
@@ -108,7 +128,7 @@ def generate_answer(
 受保护结论：{entity_name}首次出现于第{ch_no}章《{ch_title}》。
 你必须以该结论为准，不能根据后期向量片段改写首次出现章节。"""
 
-    prompt = f"""{SYSTEM_PROMPT}{extra_instructions}{protected_block}
+    prompt = f"""{SYSTEM_PROMPT}{extra_instructions}{protected_block}{causal_block}
 
 原文片段：
 {context}
@@ -173,10 +193,12 @@ def query(project_id: str, question: str, top_k: int | None = None) -> dict:
     protected_answer = evidence.get("protected_answer")
     evidence_scores = evidence.get("evidence_scores", [])
 
+    causal_edges = evidence.get("causal_edges", [])
     answer = generate_answer(
         question, chunks, analysis, timeline_events, guard,
         entity_mentions, entity_timeline, entity_relations,
         protected_answer,
+        causal_edges,
     )
 
     seen = set()
@@ -269,12 +291,31 @@ def query(project_id: str, question: str, top_k: int | None = None) -> dict:
             "status": rel.get("status", ""),
         })
 
+    causal_edges_resp = []
+    for edge in causal_edges:
+        causal_edges_resp.append({
+            "edge_id": edge.get("edge_id", ""),
+            "relation": edge.get("relation", ""),
+            "from_event_id": edge.get("from_event_id", ""),
+            "to_event_id": edge.get("to_event_id", ""),
+            "from_chapter_no": edge.get("from_chapter_no"),
+            "to_chapter_no": edge.get("to_chapter_no"),
+            "from_event_type": edge.get("from_event_type"),
+            "to_event_type": edge.get("to_event_type"),
+            "shared_subjects": edge.get("shared_subjects") or [],
+            "evidence": edge.get("evidence"),
+            "from_summary": edge.get("from_summary"),
+            "to_summary": edge.get("to_summary"),
+            "confidence": edge.get("confidence"),
+        })
+
     result = {
         "answer": answer,
         "citations": citations,
         "retrieved_chunks": retrieved_chunks,
         "query_analysis": analysis,
         "timeline_events": timeline_resp,
+        "causal_edges": causal_edges_resp,
         "entity_analysis": entity_analysis,
         "entity_mentions": entity_mentions_resp,
         "entity_timeline": entity_timeline_resp,

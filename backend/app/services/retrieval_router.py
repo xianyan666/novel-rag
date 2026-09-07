@@ -1,7 +1,7 @@
 """检索路由：根据问题类型选择检索策略，合并排序，证据保护。"""
 
 from .question_classifier import classify_question
-from .timeline_service import query_timeline
+from .timeline_service import query_timeline, get_causal_edges_for_events
 from .keyword_service import keyword_search, extract_keywords
 from .vector_service import retrieve_chunks
 from .entity_query_router import detect_entities, route_entity_query
@@ -81,7 +81,7 @@ def _merge_and_rank(
     return all_items
 
 
-def guard_evidence(query_analysis: dict, merged_chunks: list[dict], timeline_events: list[dict]) -> dict:
+def guard_evidence(query_analysis: dict, merged_chunks: list[dict], timeline_events: list[dict], causal_edges: list[dict] | None = None) -> dict:
     warnings = []
     insufficient = False
     query_type = query_analysis["query_type"]
@@ -89,17 +89,23 @@ def guard_evidence(query_analysis: dict, merged_chunks: list[dict], timeline_eve
     if query_type == "sequence_first":
         if not timeline_events:
             insufficient = True
-            warnings.append("未找到时间线事件证据，无法确认顺序。")
-
+            warnings.append("时间线证据不足，无法可靠判断'第一次/最早'。")
         if timeline_events:
             early_events = [e for e in timeline_events if e["chapter_no"] <= 100]
             if not early_events:
-                warnings.append("所有时间线候选均来自后期章节(>100章)，可能无法确认'第一个'。")
-
+                warnings.append("未找到早期章节(<=100)的时间线事件，'第一个'判断可能不可靠。")
         if not timeline_events and merged_chunks:
             late_chunks = [c for c in merged_chunks if c.get("chapter_no", 0) > 500]
             if late_chunks and len(late_chunks) == len(merged_chunks):
                 warnings.append("所有召回片段均来自后期章节(>500章)，不建议据此回答'第一个'。")
+
+    if query_type == "causal_why":
+        edges = causal_edges or []
+        if not edges and not timeline_events:
+            insufficient = True
+            warnings.append("因果边与时间线证据不足，请谨慎推断原因。")
+        elif not edges:
+            warnings.append("未找到足够高置信度的因果边，仅基于事件先后与原文片段回答。")
 
     if query_type in _ENTITY_QUERY_TYPES:
         if not merged_chunks:
@@ -113,8 +119,10 @@ def guard_evidence(query_analysis: dict, merged_chunks: list[dict], timeline_eve
 
     return {
         "insufficient_order_evidence": insufficient,
+        "insufficient_causal_evidence": bool(query_type == "causal_why" and insufficient),
         "warnings": warnings,
     }
+
 
 
 _ENTITY_QUERY_TYPES = {
@@ -137,6 +145,7 @@ def retrieve_evidence(project_id: str, question: str, top_k: int | None = None) 
     vector_chunks = []
     keyword_chunks = []
     timeline_events = []
+    causal_edges = []
     entity_mentions = []
     entity_timeline = []
     entity_relations = []
@@ -254,6 +263,20 @@ def retrieve_evidence(project_id: str, question: str, top_k: int | None = None) 
             keyword_chunks = keyword_search(project_id, keywords, limit=top_k)
         route_parts.extend(["timeline", "keyword"])
         merged = _merge_and_rank(vector_chunks, keyword_chunks, timeline_events, query_type)
+    elif query_type == "causal_why":
+        timeline_events = query_timeline(project_id, event_hints, entities, query_type, limit=16)
+        causal_edges = get_causal_edges_for_events(
+            project_id,
+            [e.get("event_id") for e in timeline_events if e.get("event_id")],
+        )[:20]
+        keywords = extract_keywords(question)
+        if event_hints:
+            keywords.extend(event_hints)
+        if keywords:
+            keyword_chunks = keyword_search(project_id, keywords, limit=top_k)
+        vector_chunks = retrieve_chunks(project_id, question, top_k, world_ids or None)
+        route_parts.extend(["causal", "timeline", "keyword", "vector"])
+        merged = _merge_and_rank(vector_chunks, keyword_chunks, timeline_events, query_type)
     elif query_type == "timeline_summary":
         timeline_events = query_timeline(project_id, event_hints, entities, query_type, limit=30)
         route_parts.append("timeline")
@@ -274,13 +297,14 @@ def retrieve_evidence(project_id: str, question: str, top_k: int | None = None) 
 
     merged = merged[:top_k]
 
-    guard = guard_evidence(analysis, merged, timeline_events)
+    guard = guard_evidence(analysis, merged, timeline_events, causal_edges)
 
     route = "_plus_".join(route_parts) if route_parts else "none"
     debug = {
         "route": route,
         "vector_count": len(vector_chunks),
         "timeline_count": len(timeline_events),
+        "causal_edge_count": len(causal_edges),
         "keyword_count": len(keyword_chunks),
         "entity_mention_count": len(entity_mentions),
         "entity_timeline_count": len(entity_timeline),
@@ -297,6 +321,7 @@ def retrieve_evidence(project_id: str, question: str, top_k: int | None = None) 
         "query_analysis": analysis,
         "chunks": merged,
         "timeline_events": timeline_events,
+        "causal_edges": causal_edges,
         "entity_mentions": entity_mentions,
         "entity_timeline": entity_timeline,
         "entity_relations": entity_relations,

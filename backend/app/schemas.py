@@ -58,6 +58,22 @@ class TimelineEventResponse(BaseModel):
     confidence: float | None = None
 
 
+class CausalEdgeResponse(BaseModel):
+    edge_id: str
+    relation: str
+    from_event_id: str
+    to_event_id: str
+    from_chapter_no: int | None = None
+    to_chapter_no: int | None = None
+    from_event_type: str | None = None
+    to_event_type: str | None = None
+    shared_subjects: list[str] = []
+    evidence: str | None = None
+    from_summary: str | None = None
+    to_summary: str | None = None
+    confidence: float | None = None
+
+
 class RetrievalDebug(BaseModel):
     route: str
     vector_count: int = 0
@@ -151,6 +167,7 @@ class QueryResponse(BaseModel):
     retrieved_chunks: list[RetrievedChunk]
     query_analysis: QueryAnalysis | None = None
     timeline_events: list[TimelineEventResponse] = []
+    causal_edges: list[CausalEdgeResponse] = []
     entity_analysis: EntityAnalysis | None = None
     entity_mentions: list[EntityMentionResponse] = []
     entity_timeline: list[EntityTimelineEventResponse] = []

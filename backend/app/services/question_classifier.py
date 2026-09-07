@@ -10,6 +10,11 @@ _SEQUENCE_ORDER_PATTERNS = [
     "第几次", "第几个", "顺序", "先后", "依次", "分别在哪", "时间顺序", "发展过程",
 ]
 
+_CAUSAL_WHY_PATTERNS = [
+    "为什么", "为什幺", "为何", "怎么会", "怎幺会", "怎么发展到", "怎幺发展到",
+    "原因是", "因为什么", "因为什幺", "导致了什么", "导致了什幺", "是什么原因", "是什幺原因",
+]
+
 _TIMELINE_SUMMARY_PATTERNS = [
     "时间线", "经历", "全过程", "发展脉络", "事件脉络", "按章节整理",
 ]
@@ -186,6 +191,13 @@ def classify_question(question: str) -> dict:
             if pat in q:
                 query_type = "sequence_order"
                 confidence = 0.85
+                break
+
+    if query_type == "normal_fact":
+        for pat in _CAUSAL_WHY_PATTERNS:
+            if pat in q:
+                query_type = "causal_why"
+                confidence = 0.9
                 break
 
     if query_type == "normal_fact":

@@ -51,3 +51,13 @@ python scripts/build_timeline.py --project mystic_recovery
 
 查询：`timeline_summary` / `sequence_*` 会在 follows 展开后再扩一层因果邻居。
 可用 `GET /api/projects/{id}/timeline/edges?relation=causes` 筛选。
+
+
+## v2.4 折中：收紧因果 + 「为什么」路由
+
+因果边收紧：
+- `enables` 必须共享主体
+- `causes` 跨章必须共享主体；同章需共享主体或强提示词
+- 去掉弱提示词「才」；章距上限 2；置信度门槛约 0.68
+
+问答：问题含「为什么/为何/怎么会/原因是」时，`query_type=causal_why`，检索走 causal+timeline+keyword+vector，并把因果候选边注入回答提示。

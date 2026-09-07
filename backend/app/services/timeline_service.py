@@ -243,13 +243,17 @@ def expand_causal_neighbors(
 def get_causal_edges_for_events(
     project_id: str,
     event_ids: list[str],
+    min_confidence: float = 0.68,
 ) -> list[dict]:
     idset = set(event_ids)
-    return [
+    edges = [
         e for e in load_timeline_edges(project_id)
         if e.get("relation") in {"causes", "enables", "blocks"}
         and (e.get("from_event_id") in idset or e.get("to_event_id") in idset)
+        and float(e.get("confidence") or 0) >= min_confidence
     ]
+    edges.sort(key=lambda e: (-float(e.get("confidence") or 0), e.get("from_chapter_no") or 0))
+    return edges
 
 
 def query_timeline(
@@ -292,8 +296,9 @@ def query_timeline(
     if chain_radius > 0 and seeds:
         chained = expand_follows_chain(project_id, seeds, radius=chain_radius)
         # 时间线/顺序类问题再叠一层因果邻居，便于回答「为什么/怎么发展到」
-        if query_type in {"timeline_summary", "sequence_order", "sequence_first"}:
-            chained = expand_causal_neighbors(project_id, chained, depth=1)
+        if query_type in {"timeline_summary", "sequence_order", "sequence_first", "causal_why"}:
+            depth = 2 if query_type == "causal_why" else 1
+            chained = expand_causal_neighbors(project_id, chained, depth=depth)
         chained = sorted(chained, key=lambda e: (e["chapter_no"], e.get("chunk_id", ""), e["event_id"]))
         return chained[:limit]
 

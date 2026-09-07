@@ -1,6 +1,6 @@
 """从 chunks.jsonl 规则抽取通用叙事事件，并生成 follows 边。
 
-v2.3：在 v2.2 基础上，增加保守因果边 causes/enables/blocks。
+v2.4：收紧因果边，并配合「为什么」问答路由使用。
 """
 
 from __future__ import annotations
@@ -232,12 +232,14 @@ _TYPE_PAIR_BLOCKS: set[tuple[str, str]] = {
     ("rule_reveal", "death_or_seal"),  # 如「杀不死」约束死亡预期
 }
 
-_CAUSAL_CUES = [
-    "因为", "由于", "导致", "造成", "于是", "所以", "结果",
-    "使得", "由此", "因此", "从而", "才", "被迫", "引发",
+# 弱提示词（如「才」）噪声大，不单独使用
+_CAUSAL_CUES_STRONG = [
+    "因为", "由于", "导致", "造成", "于是", "所以",
+    "使得", "因此", "从而", "引发", "由此",
 ]
 
-_MAX_CAUSAL_CHAPTER_GAP = 3
+_MAX_CAUSAL_CHAPTER_GAP = 2
+_MIN_CAUSAL_CONFIDENCE = 0.68
 
 
 def _shared_subjects(a: dict, b: dict) -> list[str]:
@@ -246,8 +248,8 @@ def _shared_subjects(a: dict, b: dict) -> list[str]:
     return sorted(sa & sb)
 
 
-def _has_causal_cue(text: str) -> str | None:
-    for cue in _CAUSAL_CUES:
+def _has_strong_causal_cue(text: str) -> str | None:
+    for cue in _CAUSAL_CUES_STRONG:
         if cue in (text or ""):
             return cue
     return None
@@ -276,13 +278,13 @@ def _build_follows_edges(events: list[dict], project_id: str) -> list[dict]:
 
 
 def _build_causal_edges(events: list[dict], project_id: str) -> list[dict]:
-    """保守因果边：近邻 + 类型对，最好还有共享主体或因果提示词。"""
+    """收紧版因果边：近邻 + 类型对，且优先要求共享主体。"""
     edges: list[dict] = []
     n = len(events)
     seen_pairs: set[tuple[str, str, str]] = set()
 
     for i, a in enumerate(events):
-        for j in range(i + 1, min(i + 8, n)):  # 只看后续少量候选
+        for j in range(i + 1, min(i + 6, n)):
             b = events[j]
             gap = int(b["chapter_no"]) - int(a["chapter_no"])
             if gap < 0:
@@ -300,14 +302,20 @@ def _build_causal_edges(events: list[dict], project_id: str) -> list[dict]:
                 continue
 
             shared = _shared_subjects(a, b)
-            cue = _has_causal_cue(b.get("evidence") or "") or _has_causal_cue(
+            cue = _has_strong_causal_cue(b.get("evidence") or "") or _has_strong_causal_cue(
                 b.get("event_summary") or ""
             )
 
-            # 同章或邻章：允许仅靠类型对；跨 2~3 章必须有共享主体或提示词
-            if gap >= 2 and not shared and not cue:
+            # enables：必须共享主体（折中收紧的核心）
+            if relation == "enables" and not shared:
                 continue
-            # blocks 更严：需要规则侧证据像否定/规则，或共享主体
+            # causes：同章可靠强提示词；跨章必须共享主体
+            if relation == "causes":
+                if gap == 0 and not shared and not cue:
+                    continue
+                if gap >= 1 and not shared:
+                    continue
+            # blocks：规则否定证据或共享主体
             if relation == "blocks":
                 ev = (a.get("evidence") or "") + (a.get("event_summary") or "")
                 if not any(x in ev for x in ("无法", "不能", "杀不死", "规则", "规律")) and not shared:
@@ -318,16 +326,18 @@ def _build_causal_edges(events: list[dict], project_id: str) -> list[dict]:
                 continue
             seen_pairs.add(key)
 
-            conf = 0.55
+            conf = 0.58
             if shared:
-                conf += 0.1
+                conf += 0.12
             if cue:
-                conf += 0.1
+                conf += 0.08
             if gap == 0:
                 conf += 0.05
             if relation == "blocks":
-                conf = min(conf, 0.6)
-            conf = min(conf, 0.8)
+                conf = min(conf, 0.72)
+            conf = min(conf, 0.85)
+            if conf < _MIN_CAUSAL_CONFIDENCE:
+                continue
 
             reason_parts = [f"类型对 {a['event_type']}→{b['event_type']} => {relation}"]
             if shared:
@@ -351,7 +361,7 @@ def _build_causal_edges(events: list[dict], project_id: str) -> list[dict]:
                 "from_summary": a.get("event_summary"),
                 "to_summary": b.get("event_summary"),
                 "confidence": round(conf, 3),
-                "extract_method": "heuristic_v2.3",
+                "extract_method": "heuristic_v2.4",
             })
 
     return edges
@@ -490,8 +500,8 @@ def build_timeline(project_id: str) -> dict:
 
     index = {
         "project_id": project_id,
-        "schema_version": 3,
-        "extract_version": "rule_v2.3",
+        "schema_version": 4,
+        "extract_version": "rule_v2.4",
         "edge_relation_default": "follows",
         "event_types": sorted(EVENT_TYPE_LABELS.keys()),
         "by_event_type": by_event_type,
@@ -510,7 +520,7 @@ def build_timeline(project_id: str) -> dict:
             "max 1 event per chapter+type",
             "drop forum/noise evidence markers",
             "death negation/rule -> rule_reveal",
-            "causal edges: causes/enables/blocks (heuristic)",
+            "causal edges tightened v2.4 (shared subjects for enables)",
         ],
     }
     index_path = dd / "timeline_index.json"
