@@ -36,3 +36,18 @@ python scripts/build_timeline.py --project mystic_recovery
 - `POST /api/projects/{id}/timeline/build`
 - `GET /api/projects/{id}/timeline/events`
 - `GET /api/projects/{id}/timeline/edges?relation=follows`
+
+## 因果边（v2.3）
+
+在 `follows` 之外，额外写入保守启发式因果边：
+
+| relation | 含义 |
+|----------|------|
+| causes | 更强的导致 |
+| enables | 使后续可能发生 |
+| blocks | 规则/约束阻断某类结果 |
+
+约束：章距 ≤ 3；跨 2 章以上需要共享主体或因果提示词（因为/导致/于是…）。证据写在 `edge.evidence`。
+
+查询：`timeline_summary` / `sequence_*` 会在 follows 展开后再扩一层因果邻居。
+可用 `GET /api/projects/{id}/timeline/edges?relation=causes` 筛选。

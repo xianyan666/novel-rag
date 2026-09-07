@@ -1,4 +1,4 @@
-"""时间线事件查询服务：通用事件类型 + follows 链展开。"""
+"""时间线事件查询服务：通用事件类型 + follows/因果链展开。"""
 
 from __future__ import annotations
 
@@ -175,6 +175,83 @@ def expand_follows_chain(
     return [by_id[eid] for eid in ordered_ids]
 
 
+def expand_causal_neighbors(
+    project_id: str,
+    seed_events: list[dict],
+    relations: list[str] | None = None,
+    depth: int = 1,
+) -> list[dict]:
+    """沿 causes/enables/blocks 展开邻居（默认出入边各 depth 层）。"""
+    if not seed_events or depth <= 0:
+        return seed_events
+
+    allow = set(relations or ["causes", "enables", "blocks"])
+    events = load_timeline_events(project_id)
+    by_id = {e["event_id"]: e for e in events}
+    index = load_timeline_index(project_id)
+    cout = index.get("causal_out") or {}
+    cin = index.get("causal_in") or {}
+
+    if not cout and not cin:
+        for edge in load_timeline_edges(project_id):
+            rel = edge.get("relation")
+            if rel not in allow:
+                continue
+            cout.setdefault(edge["from_event_id"], []).append({
+                "relation": rel,
+                "other_event_id": edge["to_event_id"],
+            })
+            cin.setdefault(edge["to_event_id"], []).append({
+                "relation": rel,
+                "other_event_id": edge["from_event_id"],
+            })
+
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+
+    def add_id(eid: str) -> None:
+        if eid in by_id and eid not in seen:
+            seen.add(eid)
+            ordered_ids.append(eid)
+
+    frontier = [e["event_id"] for e in seed_events]
+    for eid in frontier:
+        add_id(eid)
+
+    for _ in range(depth):
+        nxt_frontier: list[str] = []
+        for eid in frontier:
+            for item in cout.get(eid, []):
+                if item.get("relation") in allow:
+                    oid = item.get("other_event_id")
+                    if oid and oid not in seen:
+                        add_id(oid)
+                        nxt_frontier.append(oid)
+            for item in cin.get(eid, []):
+                if item.get("relation") in allow:
+                    oid = item.get("other_event_id")
+                    if oid and oid not in seen:
+                        add_id(oid)
+                        nxt_frontier.append(oid)
+        frontier = nxt_frontier
+        if not frontier:
+            break
+
+    return [by_id[eid] for eid in ordered_ids]
+
+
+def get_causal_edges_for_events(
+    project_id: str,
+    event_ids: list[str],
+) -> list[dict]:
+    idset = set(event_ids)
+    return [
+        e for e in load_timeline_edges(project_id)
+        if e.get("relation") in {"causes", "enables", "blocks"}
+        and (e.get("from_event_id") in idset or e.get("to_event_id") in idset)
+    ]
+
+
 def query_timeline(
     project_id: str,
     event_hints: list[str] | None = None,
@@ -214,7 +291,9 @@ def query_timeline(
 
     if chain_radius > 0 and seeds:
         chained = expand_follows_chain(project_id, seeds, radius=chain_radius)
-        # 保持章节序，截断
+        # 时间线/顺序类问题再叠一层因果邻居，便于回答「为什么/怎么发展到」
+        if query_type in {"timeline_summary", "sequence_order", "sequence_first"}:
+            chained = expand_causal_neighbors(project_id, chained, depth=1)
         chained = sorted(chained, key=lambda e: (e["chapter_no"], e.get("chunk_id", ""), e["event_id"]))
         return chained[:limit]
 

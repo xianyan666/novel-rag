@@ -1,6 +1,6 @@
 """从 chunks.jsonl 规则抽取通用叙事事件，并生成 follows 边。
 
-v2.2：在 v2.1 基础上，修正否定句/规则句误判为死亡。
+v2.3：在 v2.2 基础上，增加保守因果边 causes/enables/blocks。
 """
 
 from __future__ import annotations
@@ -204,16 +204,64 @@ def _dedupe_events(events: list[dict]) -> list[dict]:
     return kept
 
 
+# 近邻类型对 → 默认因果关系（仍需窗口/共享主体等约束）
+_TYPE_PAIR_RELATION: dict[tuple[str, str], str] = {
+    ("encounter", "conflict"): "enables",
+    ("encounter", "state_change"): "causes",
+    ("encounter", "death_or_seal"): "causes",
+    ("conflict", "death_or_seal"): "causes",
+    ("conflict", "state_change"): "causes",
+    ("conflict", "ability_change"): "enables",
+    ("clue", "conflict"): "enables",
+    ("clue", "state_change"): "enables",
+    ("clue", "ability_change"): "enables",
+    ("rule_reveal", "ability_change"): "enables",
+    ("rule_reveal", "state_change"): "enables",
+    ("rule_reveal", "conflict"): "enables",
+    ("ability_change", "conflict"): "enables",
+    ("ability_change", "state_change"): "enables",
+    ("ability_change", "death_or_seal"): "enables",
+    ("alliance_or_break", "conflict"): "enables",
+    ("alliance_or_break", "state_change"): "enables",
+    ("state_change", "death_or_seal"): "causes",
+    ("state_change", "conflict"): "enables",
+}
+
+# rule 阻止某些结果（很保守）
+_TYPE_PAIR_BLOCKS: set[tuple[str, str]] = {
+    ("rule_reveal", "death_or_seal"),  # 如「杀不死」约束死亡预期
+}
+
+_CAUSAL_CUES = [
+    "因为", "由于", "导致", "造成", "于是", "所以", "结果",
+    "使得", "由此", "因此", "从而", "才", "被迫", "引发",
+]
+
+_MAX_CAUSAL_CHAPTER_GAP = 3
+
+
+def _shared_subjects(a: dict, b: dict) -> list[str]:
+    sa = set(a.get("subjects") or [])
+    sb = set(b.get("subjects") or [])
+    return sorted(sa & sb)
+
+
+def _has_causal_cue(text: str) -> str | None:
+    for cue in _CAUSAL_CUES:
+        if cue in (text or ""):
+            return cue
+    return None
+
+
 def _build_follows_edges(events: list[dict], project_id: str) -> list[dict]:
     edges: list[dict] = []
     for i in range(len(events) - 1):
         a = events[i]
         b = events[i + 1]
-        # 跨章过远的相邻事件降低置信度，但仍标 follows（非因果）
         gap = abs(int(b["chapter_no"]) - int(a["chapter_no"]))
         conf = 0.6 if gap <= 1 else (0.45 if gap <= 5 else 0.3)
         edges.append({
-            "edge_id": f"{project_id}_edge_{i+1:06d}",
+            "edge_id": f"{project_id}_edge_f_{i+1:06d}",
             "project_id": project_id,
             "from_event_id": a["event_id"],
             "to_event_id": b["event_id"],
@@ -225,6 +273,94 @@ def _build_follows_edges(events: list[dict], project_id: str) -> list[dict]:
             "extract_method": "order",
         })
     return edges
+
+
+def _build_causal_edges(events: list[dict], project_id: str) -> list[dict]:
+    """保守因果边：近邻 + 类型对，最好还有共享主体或因果提示词。"""
+    edges: list[dict] = []
+    n = len(events)
+    seen_pairs: set[tuple[str, str, str]] = set()
+
+    for i, a in enumerate(events):
+        for j in range(i + 1, min(i + 8, n)):  # 只看后续少量候选
+            b = events[j]
+            gap = int(b["chapter_no"]) - int(a["chapter_no"])
+            if gap < 0:
+                continue
+            if gap > _MAX_CAUSAL_CHAPTER_GAP:
+                break
+
+            pair = (a["event_type"], b["event_type"])
+            relation = None
+            if pair in _TYPE_PAIR_BLOCKS and gap <= 2:
+                relation = "blocks"
+            elif pair in _TYPE_PAIR_RELATION:
+                relation = _TYPE_PAIR_RELATION[pair]
+            else:
+                continue
+
+            shared = _shared_subjects(a, b)
+            cue = _has_causal_cue(b.get("evidence") or "") or _has_causal_cue(
+                b.get("event_summary") or ""
+            )
+
+            # 同章或邻章：允许仅靠类型对；跨 2~3 章必须有共享主体或提示词
+            if gap >= 2 and not shared and not cue:
+                continue
+            # blocks 更严：需要规则侧证据像否定/规则，或共享主体
+            if relation == "blocks":
+                ev = (a.get("evidence") or "") + (a.get("event_summary") or "")
+                if not any(x in ev for x in ("无法", "不能", "杀不死", "规则", "规律")) and not shared:
+                    continue
+
+            key = (a["event_id"], b["event_id"], relation)
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+
+            conf = 0.55
+            if shared:
+                conf += 0.1
+            if cue:
+                conf += 0.1
+            if gap == 0:
+                conf += 0.05
+            if relation == "blocks":
+                conf = min(conf, 0.6)
+            conf = min(conf, 0.8)
+
+            reason_parts = [f"类型对 {a['event_type']}→{b['event_type']} => {relation}"]
+            if shared:
+                reason_parts.append("共享主体:" + ",".join(shared))
+            if cue:
+                reason_parts.append(f"提示词:{cue}")
+            reason_parts.append(f"章距:{gap}")
+
+            edges.append({
+                "edge_id": f"{project_id}_edge_c_{len(edges)+1:06d}",
+                "project_id": project_id,
+                "from_event_id": a["event_id"],
+                "to_event_id": b["event_id"],
+                "relation": relation,
+                "from_chapter_no": a["chapter_no"],
+                "to_chapter_no": b["chapter_no"],
+                "from_event_type": a["event_type"],
+                "to_event_type": b["event_type"],
+                "shared_subjects": shared,
+                "evidence": " | ".join(reason_parts),
+                "from_summary": a.get("event_summary"),
+                "to_summary": b.get("event_summary"),
+                "confidence": round(conf, 3),
+                "extract_method": "heuristic_v2.3",
+            })
+
+    return edges
+
+
+def _build_all_edges(events: list[dict], project_id: str) -> list[dict]:
+    follows = _build_follows_edges(events, project_id)
+    causal = _build_causal_edges(events, project_id)
+    return follows + causal
 
 
 def build_timeline(project_id: str) -> dict:
@@ -302,7 +438,7 @@ def build_timeline(project_id: str) -> dict:
     for i, evt in enumerate(events, start=1):
         evt["event_id"] = f"{project_id}_evt_{i:06d}"
 
-    edges = _build_follows_edges(events, project_id)
+    edges = _build_all_edges(events, project_id)
 
     events_path = dd / "timeline_events.jsonl"
     with open(events_path, "w", encoding="utf-8") as f:
@@ -319,6 +455,9 @@ def build_timeline(project_id: str) -> dict:
     by_chapter: dict[str, list[str]] = {}
     follows_next: dict[str, str] = {}
     follows_prev: dict[str, str] = {}
+    causal_out: dict[str, list[dict]] = {}
+    causal_in: dict[str, list[dict]] = {}
+    relation_counts: dict[str, int] = {}
 
     for evt in events:
         eid = evt["event_id"]
@@ -328,15 +467,31 @@ def build_timeline(project_id: str) -> dict:
             by_subject.setdefault(s, []).append(eid)
 
     for edge in edges:
-        if edge["relation"] != "follows":
+        rel = edge.get("relation") or "follows"
+        relation_counts[rel] = relation_counts.get(rel, 0) + 1
+        if rel == "follows":
+            follows_next[edge["from_event_id"]] = edge["to_event_id"]
+            follows_prev[edge["to_event_id"]] = edge["from_event_id"]
             continue
-        follows_next[edge["from_event_id"]] = edge["to_event_id"]
-        follows_prev[edge["to_event_id"]] = edge["from_event_id"]
+        item = {
+            "edge_id": edge["edge_id"],
+            "relation": rel,
+            "other_event_id": edge["to_event_id"],
+            "confidence": edge.get("confidence"),
+        }
+        causal_out.setdefault(edge["from_event_id"], []).append(item)
+        item_in = {
+            "edge_id": edge["edge_id"],
+            "relation": rel,
+            "other_event_id": edge["from_event_id"],
+            "confidence": edge.get("confidence"),
+        }
+        causal_in.setdefault(edge["to_event_id"], []).append(item_in)
 
     index = {
         "project_id": project_id,
-        "schema_version": 2,
-        "extract_version": "rule_v2.2",
+        "schema_version": 3,
+        "extract_version": "rule_v2.3",
         "edge_relation_default": "follows",
         "event_types": sorted(EVENT_TYPE_LABELS.keys()),
         "by_event_type": by_event_type,
@@ -344,6 +499,9 @@ def build_timeline(project_id: str) -> dict:
         "by_chapter": by_chapter,
         "follows_next": follows_next,
         "follows_prev": follows_prev,
+        "causal_out": causal_out,
+        "causal_in": causal_in,
+        "relation_counts": relation_counts,
         "event_count": len(events),
         "edge_count": len(edges),
         "tighten_notes": [
@@ -352,14 +510,20 @@ def build_timeline(project_id: str) -> dict:
             "max 1 event per chapter+type",
             "drop forum/noise evidence markers",
             "death negation/rule -> rule_reveal",
+            "causal edges: causes/enables/blocks (heuristic)",
         ],
     }
     index_path = dd / "timeline_index.json"
     index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    causal_count = sum(1 for e in edges if e.get("relation") != "follows")
+    follows_count = sum(1 for e in edges if e.get("relation") == "follows")
     return {
         "event_count": len(events),
         "edge_count": len(edges),
+        "follows_count": follows_count,
+        "causal_count": causal_count,
+        "relation_counts": relation_counts,
         "events_path": str(events_path),
         "edges_path": str(edges_path),
         "index_path": str(index_path),
@@ -368,13 +532,17 @@ def build_timeline(project_id: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build tightened literary timeline events + follows edges"
+        description="Build literary timeline events + follows/causal edges"
     )
     parser.add_argument("--project", required=True, help="Project ID")
     args = parser.parse_args()
 
     result = build_timeline(args.project)
-    print(f"Timeline built: {result['event_count']} events, {result['edge_count']} follows edges")
+    print(
+        f"Timeline built: {result['event_count']} events, "
+        f"{result['follows_count']} follows, {result['causal_count']} causal "
+        f"({result.get('relation_counts', {})})"
+    )
     print(f"  Events: {result['events_path']}")
     print(f"  Edges:  {result['edges_path']}")
     print(f"  Index:  {result['index_path']}")
