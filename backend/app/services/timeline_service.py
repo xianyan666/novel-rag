@@ -291,7 +291,11 @@ def query_timeline(
 
     # 时间线类问题多取一些种子，再展开链
     seed_limit = limit if query_type in {"timeline_summary", "sequence_order"} else max(3, min(limit, 8))
-    seeds = filtered[:seed_limit]
+    if query_type == "sequence_first":
+        seeds = filtered[:seed_limit]
+    else:
+        # 全文覆盖：按章节带轮转取种子，避免因果/脉络题总困在前几十章
+        seeds = _pick_seeds_across_chapters(filtered, seed_limit)
 
     if chain_radius > 0 and seeds:
         chained = expand_follows_chain(project_id, seeds, radius=chain_radius)
@@ -303,3 +307,35 @@ def query_timeline(
         return chained[:limit]
 
     return seeds[:limit]
+
+
+def _pick_seeds_across_chapters(events: list[dict], limit: int, band_size: int = 100) -> list[dict]:
+    if len(events) <= limit:
+        return list(events)
+    buckets: dict[int, list[dict]] = {}
+    for evt in events:
+        band = int(evt.get("chapter_no", 1) or 1) // band_size
+        buckets.setdefault(band, []).append(evt)
+    # 每带内保持章节升序；轮转各带，兼顾全书
+    for band in buckets:
+        buckets[band].sort(key=lambda e: (e["chapter_no"], e.get("chunk_id", ""), e["event_id"]))
+    bands = sorted(buckets.keys())
+    picked: list[dict] = []
+    seen: set[str] = set()
+    while len(picked) < limit:
+        progressed = False
+        for band in bands:
+            if not buckets.get(band):
+                continue
+            evt = buckets[band].pop(0)
+            eid = evt.get("event_id")
+            if eid in seen:
+                continue
+            seen.add(eid)
+            picked.append(evt)
+            progressed = True
+            if len(picked) >= limit:
+                break
+        if not progressed:
+            break
+    return picked

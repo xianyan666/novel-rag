@@ -60,8 +60,10 @@ def _merge_and_rank(
             })
             seen[cid] = all_items[-1]
 
-    # Compute composite score
+    # Compute composite score.
+    # 早期偏好只用于「第一次/最早」类问题；全文问答按相关度，避免中后期题被拽回前几十章。
     max_chapter = max((c.get("chapter_no", 1) for c in all_items), default=1) or 1
+    prefer_early = query_type in {"sequence_first", "entity_first_seen"}
 
     for item in all_items:
         sem = item.get("_semantic_score", 0)
@@ -70,15 +72,55 @@ def _merge_and_rank(
         ch = item.get("chapter_no", 1)
         early = 1.0 - (ch / max_chapter) if max_chapter > 0 else 0
 
-        if query_type == "sequence_first":
+        if prefer_early:
             item["_composite"] = sem * 0.25 + kw * 0.20 + evt * 0.30 + early * 0.25
-        elif query_type in ("sequence_order", "timeline_summary"):
-            item["_composite"] = sem * 0.20 + kw * 0.15 + evt * 0.30 + early * 0.35
+        elif query_type in {"sequence_order", "timeline_summary"}:
+            # 脉络题：重视事件分，不再因章节靠前加分
+            item["_composite"] = sem * 0.30 + kw * 0.25 + evt * 0.45
+        elif query_type == "causal_why":
+            item["_composite"] = sem * 0.35 + kw * 0.25 + evt * 0.40
         else:
-            item["_composite"] = sem * 0.40 + kw * 0.30 + evt * 0.20 + early * 0.10
+            item["_composite"] = sem * 0.50 + kw * 0.35 + evt * 0.15
 
     all_items.sort(key=lambda x: -x["_composite"])
+
+    # 非“首次”问题：在相近分数下做章节分散，让全书证据都有机会进上下文
+    if not prefer_early and len(all_items) > 4:
+        all_items = _diversify_by_chapter(all_items)
+
     return all_items
+
+
+def _diversify_by_chapter(items: list[dict], band_size: int = 100) -> list[dict]:
+    """轮转各章节带，减少全文问答被单一区段垄断。"""
+    buckets: dict[int, list[dict]] = {}
+    for item in items:
+        band = int(item.get("chapter_no", 1) or 1) // band_size
+        buckets.setdefault(band, []).append(item)
+
+    ordered_bands = sorted(buckets.keys(), key=lambda b: -buckets[b][0].get("_composite", 0))
+    for band in ordered_bands:
+        buckets[band].sort(key=lambda x: -x.get("_composite", 0))
+
+    diversified: list[dict] = []
+    seen_ids: set[str] = set()
+    while len(diversified) < len(items):
+        progressed = False
+        for band in ordered_bands:
+            if not buckets.get(band):
+                continue
+            item = buckets[band].pop(0)
+            cid = item.get("chunk_id")
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+            diversified.append(item)
+            progressed = True
+            if len(diversified) >= len(items):
+                break
+        if not progressed:
+            break
+    return diversified
 
 
 def guard_evidence(query_analysis: dict, merged_chunks: list[dict], timeline_events: list[dict], causal_edges: list[dict] | None = None) -> dict:
