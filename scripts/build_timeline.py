@@ -1,4 +1,7 @@
-"""从 chunks.jsonl 规则抽取通用叙事事件，并生成 follows 边。"""
+"""从 chunks.jsonl 规则抽取通用叙事事件，并生成 follows 边。
+
+v2.1：收紧规则，降低鬼眼/同章/论坛噪声。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +16,6 @@ sys.path.insert(0, str(ROOT / "backend"))
 
 from app.config import data_dir
 
-# 通用文学/网文事件类型（不再绑定《轮回乐园》术语）
 EVENT_TYPE_LABELS = {
     "encounter": "遭遇",
     "conflict": "冲突",
@@ -26,57 +28,77 @@ EVENT_TYPE_LABELS = {
     "other": "其他",
 }
 
-# 模式按优先级排列；同一 chunk 每种类型最多一条
+# 更严的模式：避免单字/高频名词裸匹配
 EVENT_PATTERNS: dict[str, list[str]] = {
     "encounter": [
-        "遇到了", "遇见了", "撞见", "碰见", "发现了鬼", "出现了鬼",
-        "鬼出现", "对面走来", "眼前出现", "突然出现",
+        "遇到了鬼", "遇见了鬼", "撞见了鬼", "发现了鬼", "出现了鬼",
+        "鬼出现了", "鬼突然出现", "厉鬼出现", "眼前出现一只",
+        "遇到了", "遇见了", "撞见",
     ],
     "conflict": [
-        "对峙", "交手", "厮杀", "搏斗", "打斗", "开战", "出手攻击",
-        "发起攻击", "互相厮杀", "杀气", "战斗开始",
+        "对峙", "交手", "厮杀", "搏斗", "打斗", "开战",
+        "出手攻击", "发起攻击", "互相厮杀", "战斗开始",
+        "和厉鬼交手", "与鬼搏斗",
     ],
     "rule_reveal": [
-        "规则是", "鬼域规则", "禁忌", "一旦违反", "违反规则",
-        "存在一条规则", "这条规则", "不能做的事", "必须遵守",
+        "规则是", "鬼域规则", "存在一条规则", "这条规则",
+        "一旦违反", "违反规则", "必须遵守", "不能做的事",
+        "杀人规则", "鬼的规则",
     ],
     "ability_change": [
-        "能力觉醒", "鬼眼", "掌控了", "能力提升", "能力变化",
-        "觉醒了", "获得能力", "强化了", "能力失控",
+        # 不再用裸「鬼眼」——必须是变化/掌控类短语
+        "能力觉醒", "能力提升", "能力变化", "能力失控",
+        "获得能力", "觉醒了", "掌控了", "强化了",
+        "鬼眼睁开", "鬼眼复苏", "鬼眼觉醒", "掌控鬼眼",
+        "使用鬼眼", "催动鬼眼", "鬼眼之力",
+        "驭鬼成功", "成为驭鬼者",
     ],
     "death_or_seal": [
-        "被杀死", "已经死亡", "死去了", "身亡", "封印住", "被封印",
+        "被杀死", "已经死亡", "死去了", "被封印", "封印住",
         "镇压住", "彻底消失", "灭杀", "粉身碎骨",
+        "死于厉鬼", "被鬼杀死", "厉鬼复苏而死",
     ],
     "alliance_or_break": [
-        "达成合作", "联手", "结盟", "一起行动", "决裂", "背叛了",
-        "交易达成", "谈妥了", "反目",
+        "达成合作", "一起联手", "结盟", "一起行动",
+        "决裂", "背叛了", "交易达成", "谈妥了", "反目",
+        "联手合作", "联手抓鬼",
     ],
     "clue": [
-        "发现线索", "找到线索", "得知真相", "原来如此", "真相是",
-        "获悉", "得到消息", "查出",
+        "发现线索", "找到线索", "得知真相", "原来如此",
+        "真相是", "这就对了", "查出了",
     ],
     "state_change": [
-        "进入鬼域", "离开鬼域", "陷入昏迷", "苏醒过来", "失去意识",
-        "恢复意识", "陷入恐慌", "失控了", "平静下来",
-        # 兼容旧乐园类叙述，映射为状态变化而非独立类型
-        "进入衍生世界", "进入世界", "回归乐园", "返回轮回乐园",
+        "进入鬼域", "离开鬼域", "陷入昏迷", "苏醒过来",
+        "失去意识", "恢复意识", "失控了",
+        "进入衍生世界", "回归乐园", "返回轮回乐园",
         "传送开始", "世界结算",
     ],
 }
 
+# 证据窗口命中这些，整条丢弃（论坛/转述噪声）
+NOISE_EVIDENCE_MARKERS = [
+    "帖子", "回帖", "楼主", "论坛", "点击进入", "更多精彩小说",
+    "名侦探动画", "报了警", "向警方",
+]
 
-def _load_name_lexicon(project_id: str) -> list[str]:
+# 同章每种类型最多保留几条（按首次出现）
+MAX_PER_CHAPTER_TYPE = 1
+
+
+def _load_character_names(project_id: str) -> list[str]:
+    """只取人物/厉鬼角色，排除 item/concept（鬼眼、鬼域）。"""
     names: list[str] = []
     seed_path = ROOT / "config" / "entities.seed.json"
     if seed_path.exists():
         try:
             for item in json.loads(seed_path.read_text(encoding="utf-8")):
+                et = item.get("type", "")
+                if et not in {"character"}:
+                    continue
                 names.append(item.get("name", ""))
                 names.extend(item.get("aliases", []))
         except Exception:
             pass
-    # 长名优先，减少短别名误伤
     names = [n for n in names if n]
     names.sort(key=len, reverse=True)
     return names
@@ -94,10 +116,17 @@ def extract_evidence(text: str, keyword: str, max_len: int = 300) -> str:
     return evidence
 
 
+def _is_noisy_evidence(evidence: str) -> bool:
+    return any(m in evidence for m in NOISE_EVIDENCE_MARKERS)
+
+
 def _summarize(event_type: str, keyword: str, evidence: str) -> str:
     label = EVENT_TYPE_LABELS.get(event_type, event_type)
-    # 取证据首句式片段，去掉换行
     snippet = re.sub(r"\s+", " ", evidence).strip()
+    # 尽量从关键词附近起摘要
+    idx = snippet.find(keyword)
+    if idx > 0:
+        snippet = snippet[max(0, idx - 8):]
     if len(snippet) > 72:
         snippet = snippet[:72].rstrip() + "…"
     if not snippet:
@@ -115,25 +144,45 @@ def _extract_subjects(text: str, names: list[str], limit: int = 4) -> list[str]:
     return found
 
 
+def _dedupe_events(events: list[dict]) -> list[dict]:
+    """同章同类型只留第一条；同章同 pattern 也去重。"""
+    kept: list[dict] = []
+    chapter_type_count: dict[tuple[int, str], int] = {}
+    chapter_pattern: set[tuple[int, str, str]] = set()
+    for evt in events:
+        ch = evt["chapter_no"]
+        et = evt["event_type"]
+        pat = evt.get("matched_pattern") or ""
+        key_ct = (ch, et)
+        key_cp = (ch, et, pat)
+        if chapter_type_count.get(key_ct, 0) >= MAX_PER_CHAPTER_TYPE:
+            continue
+        if key_cp in chapter_pattern:
+            continue
+        chapter_type_count[key_ct] = chapter_type_count.get(key_ct, 0) + 1
+        chapter_pattern.add(key_cp)
+        kept.append(evt)
+    return kept
+
+
 def _build_follows_edges(events: list[dict], project_id: str) -> list[dict]:
-    """按章节/chunk 顺序，将相邻事件连成 follows 边（暂不做因果断言）。"""
     edges: list[dict] = []
     for i in range(len(events) - 1):
         a = events[i]
         b = events[i + 1]
-        edge_id = f"{project_id}_edge_{i+1:06d}"
+        # 跨章过远的相邻事件降低置信度，但仍标 follows（非因果）
+        gap = abs(int(b["chapter_no"]) - int(a["chapter_no"]))
+        conf = 0.6 if gap <= 1 else (0.45 if gap <= 5 else 0.3)
         edges.append({
-            "edge_id": edge_id,
+            "edge_id": f"{project_id}_edge_{i+1:06d}",
             "project_id": project_id,
             "from_event_id": a["event_id"],
             "to_event_id": b["event_id"],
             "relation": "follows",
             "from_chapter_no": a["chapter_no"],
             "to_chapter_no": b["chapter_no"],
-            "evidence": (
-                f"叙事顺序：第{a['chapter_no']}章 → 第{b['chapter_no']}章"
-            ),
-            "confidence": 0.55,
+            "evidence": f"叙事顺序：第{a['chapter_no']}章 → 第{b['chapter_no']}章",
+            "confidence": conf,
             "extract_method": "order",
         })
     return edges
@@ -145,7 +194,7 @@ def build_timeline(project_id: str) -> dict:
     if not chunks_path.exists():
         raise FileNotFoundError(f"chunks.jsonl not found at {chunks_path}")
 
-    names = _load_name_lexicon(project_id)
+    names = _load_character_names(project_id)
     events: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -164,13 +213,18 @@ def build_timeline(project_id: str) -> dict:
                     dedup_key = (chunk_id, event_type)
                     if dedup_key in seen:
                         break
-                    seen.add(dedup_key)
-
                     evidence = extract_evidence(text, pat)
+                    if _is_noisy_evidence(evidence):
+                        continue
+                    # 「遇到了/遇见了」过宽：要求附近像遭遇（鬼/人/厉）
+                    if pat in {"遇到了", "遇见了", "撞见"}:
+                        window = evidence
+                        if not any(x in window for x in ("鬼", "厉", "老人", "人影", "尸体")):
+                            continue
+                    seen.add(dedup_key)
                     subjects = _extract_subjects(text, names)
-                    evt_id = f"{project_id}_evt_{len(events)+1:06d}"
                     events.append({
-                        "event_id": evt_id,
+                        "event_id": f"{project_id}_evt_{len(events)+1:06d}",
                         "project_id": project_id,
                         "event_type": event_type,
                         "chapter_no": chapter_no,
@@ -182,13 +236,13 @@ def build_timeline(project_id: str) -> dict:
                         "matched_pattern": pat,
                         "event_summary": _summarize(event_type, pat, evidence),
                         "evidence": evidence,
-                        "confidence": 0.7,
-                        "extract_method": "rule",
+                        "confidence": 0.75,
+                        "extract_method": "rule_v2.1",
                     })
                     break
 
     events.sort(key=lambda e: (e["chapter_no"], e["chunk_id"], e["event_id"]))
-    # 重新编号，保证顺序稳定
+    events = _dedupe_events(events)
     for i, evt in enumerate(events, start=1):
         evt["event_id"] = f"{project_id}_evt_{i:06d}"
 
@@ -226,6 +280,7 @@ def build_timeline(project_id: str) -> dict:
     index = {
         "project_id": project_id,
         "schema_version": 2,
+        "extract_version": "rule_v2.1",
         "edge_relation_default": "follows",
         "event_types": sorted(EVENT_TYPE_LABELS.keys()),
         "by_event_type": by_event_type,
@@ -235,6 +290,12 @@ def build_timeline(project_id: str) -> dict:
         "follows_prev": follows_prev,
         "event_count": len(events),
         "edge_count": len(edges),
+        "tighten_notes": [
+            "no bare 鬼眼 for ability_change",
+            "subjects = character seeds only",
+            "max 1 event per chapter+type",
+            "drop forum/noise evidence markers",
+        ],
     }
     index_path = dd / "timeline_index.json"
     index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -250,7 +311,7 @@ def build_timeline(project_id: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build generic literary timeline events + follows edges"
+        description="Build tightened literary timeline events + follows edges"
     )
     parser.add_argument("--project", required=True, help="Project ID")
     args = parser.parse_args()
