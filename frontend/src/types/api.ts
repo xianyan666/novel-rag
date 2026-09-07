@@ -54,6 +54,17 @@ export interface TimelineEventInfo {
   confidence?: number
 }
 
+export interface TimelineEdgeInfo {
+  edge_id: string
+  from_event_id: string
+  to_event_id: string
+  relation: string
+  from_chapter_no?: number
+  to_chapter_no?: number
+  evidence?: string
+  confidence?: number
+}
+
 export interface RetrievalDebug {
   route: string
   vector_count: number

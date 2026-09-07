@@ -144,6 +144,18 @@ def get_timeline_events(project_id: str, event_type: str | None = None, subject:
     return {"project_id": project_id, "events": events, "count": len(events)}
 
 
+@app.get("/api/projects/{project_id}/timeline/edges")
+def get_timeline_edges(project_id: str, relation: str | None = "follows"):
+    p = project_service.get_project(project_id)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+
+    edges = timeline_service.load_timeline_edges(project_id)
+    if relation:
+        edges = [e for e in edges if e.get("relation") == relation]
+    return {"project_id": project_id, "edges": edges, "count": len(edges)}
+
+
 # ---------------------------------------------------------------------------
 # World index APIs
 # ---------------------------------------------------------------------------

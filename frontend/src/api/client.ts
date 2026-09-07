@@ -1,4 +1,4 @@
-import type { ProjectConfig, QueryResponse, TimelineEventInfo, EntityInfo, EntityMention, EntityTimelineEvent, EntityRelation, WorldInfo } from '../types/api'
+import type { ProjectConfig, QueryResponse, TimelineEventInfo, EntityInfo, EntityMention, EntityTimelineEvent, EntityRelation, WorldInfo, TimelineEdgeInfo } from '../types/api'
 
 const BASE = '/api'
 
@@ -41,6 +41,11 @@ export function buildTimeline(projectId: string): Promise<any> {
 
 export function getTimelineEvents(projectId: string): Promise<{ events: TimelineEventInfo[], count: number }> {
   return request(`/projects/${projectId}/timeline/events`)
+}
+
+export function getTimelineEdges(projectId: string, relation: string = 'follows'): Promise<{ edges: TimelineEdgeInfo[], count: number }> {
+  const params = relation ? `?relation=${encodeURIComponent(relation)}` : ''
+  return request(`/projects/${projectId}/timeline/edges${params}`)
 }
 
 export function buildWorldIndex(projectId: string): Promise<any> {

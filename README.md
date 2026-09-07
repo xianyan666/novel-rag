@@ -152,10 +152,22 @@ npm run dev
 
 ## 关于实体/时间线/世界模块
 
-这三个模块沿用上一版通用架构，但规则词典（事件词、关系词、世界边界词）原为《轮回乐园》术语定制（如「衍生世界」「主线任务」）。《神秘复苏》是都市灵异题材，这些规则命中率很低：
-
 - 实体索引：按 `entities.seed.json` 逐字符子串匹配，**可用**（已内置杨间、周正、鬼眼等种子，可按需增补）。
-- 时间线索引：`build_timeline.py` 的「进入衍生世界/主线任务」等模式基本不命中，产出稀少，可忽略。
 - 世界索引：本作无「副本/位面」结构，`build_world_index.py` 会把所有章节归入「乐园/现实过渡」占位，可忽略。
+- 时间线索引（v2）：已改为**通用叙事事件类型** + **`follows` 顺序边**（暂不做因果断言）。
+
+### 时间线 v2 用法
+
+```powershell
+python scripts/build_timeline.py --project mystic_recovery
+```
+
+产物：
+
+- `data/{project_id}/timeline_events.jsonl`：事件（encounter / conflict / rule_reveal / ability_change / death_or_seal / alliance_or_break / clue / state_change / other）
+- `data/{project_id}/timeline_edges.jsonl`：相邻事件的 `follows` 边
+- `data/{project_id}/timeline_index.json`：类型/人物/章节索引，以及 follows 前后指针
+
+查询时会按提示过滤事件，并沿 `follows` 前后各展开 1 步，方便回答「先后/脉络」类问题。`causes` / `enables` / `blocks` 尚未实现。
 
 核心的「依据原文问答 + 章节引用 + 命中片段」走向量检索，不受影响。
